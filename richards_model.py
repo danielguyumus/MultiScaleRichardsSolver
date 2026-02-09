@@ -4,15 +4,6 @@ from scipy.sparse.linalg import spsolve
 
 class RichardsSolver:
     def __init__(self, **kwargs):
-        self.dz = kwargs.get('dz', [0.1, 0.1, 0.25, 0.5, 0.15])
-        self.n_layers = len(self.dz)
-        # --- Default Soil Physics (Van Genuchten) ---
-        self.alpha = kwargs.get('alpha', 0.0335)
-        self.n_vg = kwargs.get('n_vg', 2.0)
-        self.m_vg = 1 - 1 / self.n_vg
-        self.theta_r = kwargs.get('theta_r', np.full(self.n_layers,0.102))
-        self.theta_s = kwargs.get('theta_s', np.full(self.n_layers,0.368))
-        self.Ks = kwargs.get('Ks', np.full(self.n_layers,0.00922))
 
         # --- Domain Definition ---
         self.adj_prisms = kwargs.get('adj_prisms', {
@@ -32,32 +23,44 @@ class RichardsSolver:
             4: [5.87, 0, 0, 0, 0, 2.5, 0], 5: [3.44, 0, 0, 0, 2.5, 0, 0],
             6: [1.45, 0, 0, 0, 0, 0, 0]
         })
-        
-        # Derived Domain Properties
+        self.dz = kwargs.get('dz', [0.1, 0.1, 0.25, 0.5, 0.15])
+        self.n_layers = len(self.dz)
+        self.base_elevations = kwargs.get('base_elevations',[10.0, 10.2, 10.5, 10.3, 10.1, 10.1])  # Elevation of the bottom-most face for each prisms
+
+        # --- Derived Domain Properties
         self.n_prisms = len(self.A_ij)
         self.total_cells = self.n_prisms * self.n_layers
         self.rainfall_intensity = kwargs.get('rainfall_intensity', 2e-8)
-
+        
+        # --- Default Soil Physics (Van Genuchten) ---
+        self.alpha = kwargs.get('alpha',0.0335)
+        self.n_vg = kwargs.get('n_vg',2.0)
+        self.m_vg = 1 - 1 / self.n_vg
+        self.theta_r = kwargs.get('theta_r', np.full((self.n_prisms,self.n_layers),0.102))
+        self.theta_s = kwargs.get('theta_s', np.full((self.n_prisms,self.n_layers),0.368))
+        self.Ks = kwargs.get('Ks', np.full((self.n_prisms,self.n_layers),0.00922))
+        
     # --- Physics Methods ---
-    def get_theta(self, h, lay):
-        if h >= 0: return self.theta_s[lay]
-        return self.theta_r[lay] + (self.theta_s[lay] - self.theta_r[lay]) / (1 + (self.alpha * abs(h))**self.n_vg)**self.m_vg
+    def get_theta(self, h, lay, prism):
+        if h >= 0: return self.theta_s[prism,lay]
+        return self.theta_r[prism,lay] + (self.theta_s[prism,lay] - self.theta_r[prism,lay]) / (1 + (self.alpha * abs(h))**self.n_vg)**self.m_vg
 
-    def get_K(self, h, lay):
-        if h >= 0: return self.Ks[lay]
-        Se = (self.get_theta(h,lay) - self.theta_r[lay]) / (self.theta_s[lay] - self.theta_r[lay])
-        return self.Ks[lay] * Se**0.5 * (1 - (1 - Se**(1/self.m_vg))**self.m_vg)**2
+    def get_K(self, h, lay, prism):
+        if h >= 0: return self.Ks[prism,lay]
+        Se = (self.get_theta(h,lay,prism) - self.theta_r[prism,lay]) / (self.theta_s[prism,lay] - self.theta_r[prism,lay])
+        return self.Ks[prism,lay] * Se**0.5 * (1 - (1 - Se**(1/self.m_vg))**self.m_vg)**2
 
-    def get_C(self, h,lay):
+    def get_C(self, h, lay, prism):
         if h >= 0: return 1e-10
         abs_h = abs(h)
-        num = (self.theta_s[lay] - self.theta_r[lay]) * self.m_vg * self.n_vg * (self.alpha**self.n_vg) * (abs_h**(self.n_vg-1))
+        num = (self.theta_s[prism,lay] - self.theta_r[prism,lay]) * self.m_vg * self.n_vg * (self.alpha**self.n_vg) * (abs_h**(self.n_vg-1))
         den = (1 + (self.alpha * abs_h)**self.n_vg)**(self.m_vg + 1)
         return num / den
 
     def get_G_lateral(self, i, j, lay):
         return (self.W_ij[i][j] * self.dz[lay]) / self.L_ij[i][j]
 
+    # --- Boundary conditions (Infiltration) ---
     def apply_top_boundary(self, R):
         k_top = self.n_layers - 1
         for i in range(self.n_prisms):
@@ -68,9 +71,20 @@ class RichardsSolver:
             R[idx] += Q_rain
         return R
 
+    # --- Get actual elevation ---
+    def get_z_centers(self,base_elev,dz):
+        z_centers = []
+        current_z = base_elev
+        for d in dz:
+            z_centers.append(current_z + d/2.0)
+            current_z += d
+        return z_centers
+
     # --- Solver ---
     def solve_step(self, h_n, dt, max_iter=100, tol=1e-4):
         h_m = h_n.copy()
+        # Create a 2D array [prism_index][layer_index]
+        self.Z = np.array([self.get_z_centers(b,self.dz) for b in self.base_elevations])
         
         for iteration in range(max_iter):
             LHS = lil_matrix((self.total_cells, self.total_cells))
@@ -83,9 +97,9 @@ class RichardsSolver:
                     
                     # 1. Mass Accumulation
                     V_ik = self.A_ij[i] * self.dz[k]
-                    Ci = self.get_C(h_m[idx_i],k)
-                    theta_m = self.get_theta(h_m[idx_i],k)
-                    theta_n = self.get_theta(h_n[idx_i],k)
+                    Ci = self.get_C(h_m[idx_i],k,i)
+                    theta_m = self.get_theta(h_m[idx_i],k,i)
+                    theta_n = self.get_theta(h_n[idx_i],k,i)
                     
                     LHS[idx_i, idx_i] += V_ik * Ci / dt
                     RHS[idx_i] -= (V_ik / dt) * (theta_m - theta_n)
@@ -95,9 +109,11 @@ class RichardsSolver:
                         adj_k = k + direction
                         if 0 <= adj_k < self.n_layers:
                             adj_k_idx = adj_k * self.n_prisms + i  
-                            K_face = 2 / (1/self.get_K(h_m[idx_i],k) + 1/self.get_K(h_m[adj_k_idx],adj_k))
-                            dz_avg = (self.dz[k] + self.dz[adj_k]) / 2
-                            G_v = self.A_ij[i] / dz_avg
+                            K_face = 2 / (1/self.get_K(h_m[idx_i],k, i) + 1/self.get_K(h_m[adj_k_idx],adj_k, i))
+                            dz_dist = np.abs(self.Z[i, adj_k] - self.Z[i, k])
+                            G_v = self.A_ij[i] / dz_dist #dz_avg
+                            #dz_avg = (self.dz[k] + self.dz[adj_k]) / 2
+                            #G_v = self.A_ij[i] / dz_avg
                         
                             LHS[idx_i, idx_i] += G_v * K_face
                             LHS[idx_i, adj_k_idx] -= G_v * K_face
@@ -110,7 +126,7 @@ class RichardsSolver:
                     for j in self.adj_prisms[i]:
                         if i == j: continue
                         idx_j = k * self.n_prisms + j
-                        K_face = 2/(1/self.get_K(h_m[idx_i],k) + 1/self.get_K(h_m[idx_j],k))
+                        K_face = 2/(1/self.get_K(h_m[idx_i],k,i) + 1/self.get_K(h_m[idx_j],k,j))
                         conductance = self.get_G_lateral(i, j, k) * K_face
                         
                         LHS[idx_i, idx_i] += conductance
@@ -135,7 +151,7 @@ class RichardsSolver:
             V_layer = self.dz[k]
             for i in range(self.n_prisms):
                 idx = k * self.n_prisms + i
-                theta = self.get_theta(h_array[idx],k)
+                theta = self.get_theta(h_array[idx],k,i)
                 # Area * Thickness * Water Content
                 total_water += self.A_ij[i] * V_layer * theta
         return total_water
