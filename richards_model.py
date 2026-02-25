@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.sparse import lil_matrix
 from scipy.sparse.linalg import spsolve
+from collections.abc import Iterable
 
 class RichardsSolver:
     def __init__(self, **kwargs):
@@ -31,6 +32,9 @@ class RichardsSolver:
         self.n_prisms = len(self.A_ij)
         self.total_cells = self.n_prisms * self.n_layers
         self.rainfall_intensity = kwargs.get('rainfall_intensity', 2e-8)
+        self.rainfall_prisms = kwargs.get('rainfall_prisms', None)
+        self.rainfall_by_prism = kwargs.get('rainfall_by_prism', None)
+        self.rainfall_prism_set = self._normalize_prism_ids(self.rainfall_prisms)
         
         # --- Default Soil Physics (Van Genuchten) ---
         self.alpha = kwargs.get('alpha',0.0335)
@@ -60,13 +64,61 @@ class RichardsSolver:
     def get_G_lateral(self, i, j, lay):
         return (self.W_ij[i][j] * self.dz[lay]) / self.L_ij[i][j]
 
+    def _flatten_prism_ids(self, prism_ids):
+        if prism_ids is None:
+            return
+
+        if isinstance(prism_ids, np.integer):
+            yield int(prism_ids)
+            return
+
+        if isinstance(prism_ids, np.ndarray):
+            for value in prism_ids.ravel().tolist():
+                if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+                    yield from self._flatten_prism_ids(value)
+                else:
+                    yield int(value)
+            return
+
+        if isinstance(prism_ids, Iterable) and not isinstance(prism_ids, (str, bytes)):
+            for value in prism_ids:
+                if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+                    yield from self._flatten_prism_ids(value)
+                else:
+                    yield int(value)
+            return
+
+        yield int(prism_ids)
+
+    def _normalize_prism_ids(self, prism_ids):
+        if prism_ids is None:
+            return None
+
+        normalized = set(self._flatten_prism_ids(prism_ids))
+        for prism in normalized:
+            if prism < 0 or prism >= self.n_prisms:
+                raise ValueError(f"rainfall_prisms contains invalid prism index: {prism}")
+
+        return normalized
+
+    def get_rainfall_intensity_for_prism(self, prism):
+        if self.rainfall_by_prism is not None:
+            if isinstance(self.rainfall_by_prism, dict):
+                return float(self.rainfall_by_prism.get(prism, 0.0))
+            return float(self.rainfall_by_prism[prism])
+
+        if self.rainfall_prism_set is None:
+            return self.rainfall_intensity
+
+        return self.rainfall_intensity if prism in self.rainfall_prism_set else 0.0
+
     # --- Boundary conditions (Infiltration) ---
     def apply_top_boundary(self, R):
         k_top = self.n_layers - 1
         for i in range(self.n_prisms):
             idx = k_top * self.n_prisms + i
             # Calculate flux: Area * Intensity
-            Q_rain = self.A_ij[i] * self.rainfall_intensity
+            Q_rain = self.A_ij[i] * self.get_rainfall_intensity_for_prism(i)
             # Add to the Residual vector for the top cells
             R[idx] += Q_rain
         return R
@@ -161,6 +213,29 @@ class RichardsSolver:
     
         # 1. Top is now just the sum of rain across all prisms
         for i in range(self.n_prisms):
-            flux_top += self.A_ij[i] * self.rainfall_intensity
+            flux_top += self.A_ij[i] * self.get_rainfall_intensity_for_prism(i)
             
         return flux_top
+
+    def get_lateral_fluxes(self, h_array, layer=None):
+        fluxes = {}
+        layers = range(self.n_layers) if layer is None else [layer]
+
+        for k in layers:
+            for i in range(self.n_prisms):
+                idx_i = k * self.n_prisms + i
+                for j in self.adj_prisms[i]:
+                    if j <= i:
+                        continue
+
+                    idx_j = k * self.n_prisms + j
+                    K_face = 2 / (1 / self.get_K(h_array[idx_i], k, i) + 1 / self.get_K(h_array[idx_j], k, j))
+                    conductance = self.get_G_lateral(i, j, k) * K_face
+                    q_i_from_j = conductance * (h_array[idx_j] - h_array[idx_i])
+                    fluxes[(k, i, j)] = q_i_from_j
+
+        return fluxes
+
+    def get_total_lateral_exchange(self, h_array, layer=None):
+        fluxes = self.get_lateral_fluxes(h_array, layer=layer)
+        return sum(abs(q) for q in fluxes.values())
