@@ -43,6 +43,14 @@ class RichardsSolver:
         self.theta_r = kwargs.get('theta_r', np.full((self.n_prisms,self.n_layers),0.102))
         self.theta_s = kwargs.get('theta_s', np.full((self.n_prisms,self.n_layers),0.368))
         self.Ks = kwargs.get('Ks', np.full((self.n_prisms,self.n_layers),0.00922))
+
+        S_s_input = kwargs.get('S_s', 1e-10)
+        if np.isscalar(S_s_input):
+            self.S_s = np.full((self.n_prisms, self.n_layers), float(S_s_input))
+        else:
+            self.S_s = np.array(S_s_input, dtype=float)
+            if self.S_s.shape != (self.n_prisms, self.n_layers):
+                raise ValueError(f"S_s must be scalar or shape {(self.n_prisms, self.n_layers)}")
         
     # --- Physics Methods ---
     def get_theta(self, h, lay, prism):
@@ -55,7 +63,7 @@ class RichardsSolver:
         return self.Ks[prism,lay] * Se**0.5 * (1 - (1 - Se**(1/self.m_vg))**self.m_vg)**2
 
     def get_C(self, h, lay, prism):
-        if h >= 0: return 1e-10
+        if h >= 0: return self.S_s[prism, lay]
         abs_h = abs(h)
         num = (self.theta_s[prism,lay] - self.theta_r[prism,lay]) * self.m_vg * self.n_vg * (self.alpha**self.n_vg) * (abs_h**(self.n_vg-1))
         den = (1 + (self.alpha * abs_h)**self.n_vg)**(self.m_vg + 1)
@@ -63,6 +71,9 @@ class RichardsSolver:
 
     def get_G_lateral(self, i, j, lay):
         return (self.W_ij[i][j] * self.dz[lay]) / self.L_ij[i][j]
+
+    def get_total_head_gradient(self, h_i, z_i, h_j, z_j):
+        return (h_j - h_i) + (z_j - z_i)
 
     def _flatten_prism_ids(self, prism_ids):
         if prism_ids is None:
@@ -169,10 +180,11 @@ class RichardsSolver:
                         
                             LHS[idx_i, idx_i] += G_v * K_face
                             LHS[idx_i, adj_k_idx] -= G_v * K_face
-                        
-                            grad_h = (h_m[adj_k_idx] - h_m[idx_i])
-                            gravity = 1.0 if direction == 1 else -1.0
-                            RHS[idx_i] += G_v * K_face * (grad_h + gravity)
+
+                            z_i = self.Z[i, k]
+                            z_adj = self.Z[i, adj_k]
+                            total_head_grad = self.get_total_head_gradient(h_m[idx_i], z_i, h_m[adj_k_idx], z_adj)
+                            RHS[idx_i] += G_v * K_face * total_head_grad
 
                     # 3. Horizontal Fluxes
                     for j in self.adj_prisms[i]:
@@ -183,7 +195,10 @@ class RichardsSolver:
                         
                         LHS[idx_i, idx_i] += conductance
                         LHS[idx_i, idx_j] -= conductance
-                        RHS[idx_i] += conductance * (h_m[idx_j] - h_m[idx_i])
+                        z_i = self.Z[i, k]
+                        z_j = self.Z[j, k]
+                        total_head_grad = self.get_total_head_gradient(h_m[idx_i], z_i, h_m[idx_j], z_j)
+                        RHS[idx_i] += conductance * total_head_grad
 
             dh = spsolve(LHS.tocsr(), RHS)
             h_m += dh
@@ -231,7 +246,10 @@ class RichardsSolver:
                     idx_j = k * self.n_prisms + j
                     K_face = 2 / (1 / self.get_K(h_array[idx_i], k, i) + 1 / self.get_K(h_array[idx_j], k, j))
                     conductance = self.get_G_lateral(i, j, k) * K_face
-                    q_i_from_j = conductance * (h_array[idx_j] - h_array[idx_i])
+                    z_i = self.Z[i, k]
+                    z_j = self.Z[j, k]
+                    total_head_grad = self.get_total_head_gradient(h_array[idx_i], z_i, h_array[idx_j], z_j)
+                    q_i_from_j = conductance * total_head_grad
                     fluxes[(k, i, j)] = q_i_from_j
 
         return fluxes
