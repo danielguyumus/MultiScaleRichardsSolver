@@ -48,10 +48,7 @@ $$
 This gives a linear system each iteration. 
 
 $$
-\left(\frac{C^m}{\Delta t} - \mathcal{L}[K^m]\right)\delta h
-= -\frac{\theta^m-\theta^n}{\Delta t} \
-+ \nabla\cdot\left(K^m\nabla(h^m+z)\right) \
-+ \text{BC/source terms}
+\left(\frac{C^m}{\Delta t} - \mathcal{L}[K^m]\right)\delta h = -\frac{\theta^m-\theta^n}{\Delta t} + \nabla\cdot\left(K^m\nabla (h^m+z)\right) + \text{BC/source terms}
 $$
 
 Written explicitly for each control volume $P$:
