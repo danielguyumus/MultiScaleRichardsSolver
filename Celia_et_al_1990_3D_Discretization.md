@@ -66,7 +66,7 @@ $$
 V_{ik} = A_i\,\Delta z_k,
 $$
 
-where $A_i = \texttt{A_ij[i]}$.
+where $A_i = A_{ij}[i]$.
 
 Flattened index in code:
 
