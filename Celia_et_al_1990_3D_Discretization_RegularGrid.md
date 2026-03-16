@@ -51,7 +51,7 @@ $$
 \left(\frac{C^m}{\Delta t} - \mathcal{L}[K^m]\right)\delta h
 = -\frac{\theta^m-\theta^n}{\Delta t}
 + \nabla\cdot\left(K^m\nabla(h^m+z)\right)
-+ \text{BC/source terms}.
++ \text{BC/source terms}
 $$
 
 Written explicitly for each control volume $P$:
@@ -61,7 +61,7 @@ $$
 + \sum_{N\in\mathcal{N}(P)} T_{PN}(\delta h_P-\delta h_N)
 = -\frac{V(\theta_P^m-\theta_P^n)}{\Delta t}
 + \sum_{N\in\mathcal{N}(P)} T_{PN}\left[(h_N^m-h_P^m)+(z_N-z_P)\right]
-+ B_P,
++ B_P
 $$
 
 with
