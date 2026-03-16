@@ -123,11 +123,7 @@ This is a standard finite-volume form of $\nabla\cdot[K\nabla(h+z)]$ in 3D.
 For each cell $P$:
 
 $$
-\frac{V C_P^m}{\Delta t}\,\delta h_P
-+ \sum_{N\in\mathcal{N}(P)} T_{PN}(\delta h_P-\delta h_N)
-= -\frac{V(\theta_P^m-\theta_P^n)}{\Delta t}
-+ \sum_{N\in\mathcal{N}(P)} T_{PN}\left[(h_N^m-h_P^m)+(z_N-z_P)\right]
-+ B_P,
+\frac{V C_P^m}{\Delta t}\,\delta h_P + \sum_{N\in\mathcal{N}(P)} T_{PN}(\delta h_P-\delta h_N) = -\frac{V(\theta_P^m-\theta_P^n)}{\Delta t} + \sum_{N\in\mathcal{N}(P)} T_{PN}\left[(h_N^m-h_P^m)+(z_N-z_P)\right] + B_P
 $$
 
 where $B_P$ is boundary contribution (top flux in this implementation).
