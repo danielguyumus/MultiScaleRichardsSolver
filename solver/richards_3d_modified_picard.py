@@ -19,16 +19,23 @@ class Richards3DModifiedPicard:
         Ks=0.00922,
         S_s=1e-10,
         z_base=0.0,
+        lateral_flow_scale=1.0,
     ):
         self.nx = int(nx)
         self.ny = int(ny)
         self.nz = int(nz)
         self.n = self.nx * self.ny * self.nz
+        self.total_cells = self.n
+        self.n_layers = self.nz
+        self.n_prisms = self.nx * self.ny
 
         self.dx = float(dx)
         self.dy = float(dy)
-        self.dz = float(dz)
-        self.cell_volume = self.dx * self.dy * self.dz
+        self.dz_scalar = float(dz)
+        self.dz = np.full(self.nz, self.dz_scalar, dtype=float)
+        self.cell_area = self.dx * self.dy
+        self.cell_volume = self.cell_area * self.dz_scalar
+        self.lateral_flow_scale = float(lateral_flow_scale)
 
         self.alpha = float(alpha)
         self.n_vg = float(n_vg)
@@ -40,7 +47,8 @@ class Richards3DModifiedPicard:
         self.S_s = self._as_field(S_s)
 
         self.z_base = self._as_xy_field(z_base)
-        self.z_centers = self.z_base[None, :, :] + (np.arange(self.nz)[:, None, None] + 0.5) * self.dz
+        self.base_elevations = self.z_base.reshape(-1).copy()
+        self.z_centers = self.z_base[None, :, :] + (np.arange(self.nz)[:, None, None] + 0.5) * self.dz_scalar
 
     def _as_field(self, value):
         if np.isscalar(value):
@@ -73,6 +81,19 @@ class Richards3DModifiedPicard:
 
     def _flatten(self, h_3d):
         return np.asarray(h_3d, dtype=float).reshape(-1)
+
+    def _top_flux_field(self, top_flux):
+        top_flux_field = np.asarray(top_flux, dtype=float)
+        if top_flux_field.ndim == 0:
+            top_flux_field = np.full((self.ny, self.nx), float(top_flux_field))
+        elif top_flux_field.shape != (self.ny, self.nx):
+            raise ValueError(
+                f"top_flux must be scalar or shape {(self.ny, self.nx)}, got {top_flux_field.shape}"
+            )
+        return top_flux_field
+
+    def _column_index(self, j, i):
+        return j * self.nx + i
 
     def theta(self, h):
         h = np.asarray(h, dtype=float)
@@ -131,17 +152,59 @@ class Richards3DModifiedPicard:
     def _harmonic_mean(a, b):
         return 2.0 * a * b / (a + b + 1e-30)
 
+    def get_z_centers(self, base_elev, dz):
+        z_centers = []
+        current_z = base_elev
+        for d in np.asarray(dz, dtype=float):
+            z_centers.append(current_z + d / 2.0)
+            current_z += d
+        return z_centers
+
+    def calculate_storage(self, h_array):
+        h_3d = self._unflatten(h_array)
+        return float(np.sum(self.theta(h_3d)) * self.cell_volume)
+
+    def get_boundary_flux_with_rain(self, h_array=None, top_flux=0.0):
+        top_flux_field = self._top_flux_field(top_flux)
+        return float(np.sum(top_flux_field) * self.cell_area)
+
+    def get_lateral_fluxes(self, h_array, layer=None):
+        h_3d = self._unflatten(h_array)
+        k_3d = self.conductivity(h_3d)
+        fluxes = {}
+        layers = range(self.nz) if layer is None else [int(layer)]
+
+        for k in layers:
+            for j in range(self.ny):
+                for i in range(self.nx):
+                    p = self._column_index(j, i)
+                    z_i = self.z_centers[k, j, i]
+
+                    if i + 1 < self.nx:
+                        pn = self._column_index(j, i + 1)
+                        k_face = self._harmonic_mean(k_3d[k, j, i], k_3d[k, j, i + 1])
+                        conductance = self.lateral_flow_scale * (self.dy * self.dz_scalar / self.dx) * k_face
+                        total_head_grad = (h_3d[k, j, i + 1] - h_3d[k, j, i]) + (self.z_centers[k, j, i + 1] - z_i)
+                        fluxes[(k, p, pn)] = conductance * total_head_grad
+
+                    if j + 1 < self.ny:
+                        pn = self._column_index(j + 1, i)
+                        k_face = self._harmonic_mean(k_3d[k, j, i], k_3d[k, j + 1, i])
+                        conductance = self.lateral_flow_scale * (self.dx * self.dz_scalar / self.dy) * k_face
+                        total_head_grad = (h_3d[k, j + 1, i] - h_3d[k, j, i]) + (self.z_centers[k, j + 1, i] - z_i)
+                        fluxes[(k, p, pn)] = conductance * total_head_grad
+
+        return fluxes
+
+    def get_total_lateral_exchange(self, h_array, layer=None):
+        fluxes = self.get_lateral_fluxes(h_array, layer=layer)
+        return float(sum(abs(q) for q in fluxes.values()))
+
     def solve_step(self, h_n, dt, top_flux=0.0, max_iter=50, tol=1e-6):
         h_n_3d = self._unflatten(h_n)
         h_m = h_n_3d.copy()
 
-        top_flux_field = np.asarray(top_flux, dtype=float)
-        if top_flux_field.ndim == 0:
-            top_flux_field = np.full((self.ny, self.nx), float(top_flux_field))
-        elif top_flux_field.shape != (self.ny, self.nx):
-            raise ValueError(
-                f"top_flux must be scalar or shape {(self.ny, self.nx)}, got {top_flux_field.shape}"
-            )
+        top_flux_field = self._top_flux_field(top_flux)
 
         for _ in range(max_iter):
             lhs = lil_matrix((self.n, self.n), dtype=float)
@@ -162,21 +225,21 @@ class Richards3DModifiedPicard:
                         rhs[p] -= self.cell_volume * (theta_m[k, j, i] - theta_n[k, j, i]) / dt
 
                         if k == self.nz - 1:
-                            rhs[p] += top_flux_field[j, i] * self.dx * self.dy
+                            rhs[p] += top_flux_field[j, i] * self.cell_area
 
                         neighbors = []
                         if i > 0:
-                            neighbors.append((k, j, i - 1, self.dy * self.dz / self.dx))
+                            neighbors.append((k, j, i - 1, self.lateral_flow_scale * self.dy * self.dz_scalar / self.dx))
                         if i < self.nx - 1:
-                            neighbors.append((k, j, i + 1, self.dy * self.dz / self.dx))
+                            neighbors.append((k, j, i + 1, self.lateral_flow_scale * self.dy * self.dz_scalar / self.dx))
                         if j > 0:
-                            neighbors.append((k, j - 1, i, self.dx * self.dz / self.dy))
+                            neighbors.append((k, j - 1, i, self.lateral_flow_scale * self.dx * self.dz_scalar / self.dy))
                         if j < self.ny - 1:
-                            neighbors.append((k, j + 1, i, self.dx * self.dz / self.dy))
+                            neighbors.append((k, j + 1, i, self.lateral_flow_scale * self.dx * self.dz_scalar / self.dy))
                         if k > 0:
-                            neighbors.append((k - 1, j, i, self.dx * self.dy / self.dz))
+                            neighbors.append((k - 1, j, i, self.cell_area / self.dz_scalar))
                         if k < self.nz - 1:
-                            neighbors.append((k + 1, j, i, self.dx * self.dy / self.dz))
+                            neighbors.append((k + 1, j, i, self.cell_area / self.dz_scalar))
 
                         for kn, jn, inn, g in neighbors:
                             pn = self._idx(kn, jn, inn)
