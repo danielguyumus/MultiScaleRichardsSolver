@@ -215,12 +215,12 @@ class RichardsSolver:
         total_water = 0
         # Flattened index logic: k * n_prisms + i
         for k in range(self.n_layers):
-            V_layer = self.dz[k]
+            dz_layer = self.dz[k]
             for i in range(self.n_prisms):
                 idx = k * self.n_prisms + i
                 theta = self.get_theta(h_array[idx],k,i)
                 # Area * Thickness * Water Content
-                total_water += self.A_ij[i] * V_layer * theta
+                total_water += self.A_ij[i] * dz_layer * theta
         return total_water
 
     def get_boundary_flux_with_rain(self, h_array):
